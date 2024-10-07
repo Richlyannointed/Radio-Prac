@@ -1,4 +1,0 @@
-astropy
-pandas
-numpy 
-matplotlib
