@@ -71,8 +71,11 @@ def extract_gal_longitudes(obs_data: list[dict]) -> list:
             print(table['HEADER']['BMAJ'])
             print()
             """
-
-            longitudes.add(np.round(np.mean(table['Gal_Long']), 2)) # store all unique longitudes up to 2nd decimal
+            gal_long = np.round(np.mean(table['Gal_Long']), 0) # mean longitude up to whole number
+            if gal_long > 0:
+                longitudes.add(gal_long)
+            else:
+                longitudes.add(360 + gal_long)
 
         except TypeError:  # Catch TypeError if the value is not roundable
             print('failed to round longitude')
@@ -124,6 +127,13 @@ def stack_obs_by_longitude(obs_data: list[list[dict]]) -> dict :
     ------
     obs_data : list of lists of grouped observation dictionaries eg., 
                 [ [{long_28_A},{long_28_B}, {long_28_C}, ...], [{long_300_A}, long_300_B}, long_300_C}, ...], ... ]
+    
+    returns
+    -------
+    dict : dictionary with structure: { 'GAL_LONG' : str (eg, 'gal_l##'),
+                                        'LEFT_POL': DataFrame
+                                        'RIGHT_POL': DataFrame
+                                        }
     """
     result = {}
     for longitudes in obs_data:
@@ -151,8 +161,8 @@ def stack_obs_by_longitude(obs_data: list[list[dict]]) -> dict :
         left_pol = np.column_stack((freq, summed_left_pol)) # stack polimetry
         right_pol = np.column_stack((freq, summed_right_pol))
         
-        result[f'long{longitude_str:.0f}'] = {
-            'GAL_LONG':longitude_str ,
+        result[f'gal{longitude_str:.0f}'] = {
+            'GAL_LONG': f'gal_l{longitude_str:.0f}' ,
             'LEFT_POL': pd.DataFrame({'frequency': left_pol[:,0], 'counts': left_pol[:,1]}),
             'RIGHT_POL': pd.DataFrame({'frequency': right_pol[:,0], 'counts': right_pol[:,1]})
             }
@@ -163,9 +173,8 @@ def window_obs(data: dict, f_min: float, f_max: float) -> None:
     """Window observation data around 21cm line based on frequency range of Bonn data"""
     for info in data.values():
         for pole, df in info.items():
-            if pole == 'GAL_LONG':
-                continue
-            info[pole] = df[(df['frequency'] > f_min) & (df['frequency'] < f_max)]
+            if 'POL' in pole:
+                info[pole] = df[(df['frequency'] > f_min) & (df['frequency'] < f_max)]
         # df1 = info['LEFT_POL']
         # df2 = info['RIGHT_POL']
         # info['LEFT_POL'] = df1[(df1['frequency'] > f_min) & (df1['frequency'] < f_max)]
@@ -183,19 +192,17 @@ def normalise_floor_obs(data:dict) -> None:
     """Normalise and floor observation data counts around 21cm line"""
     for longitude in data.values():
         for pole, df in longitude.items():
-            if pole == 'GAL_LONG':
-                continue
-            longitude[pole]['counts'] = df['counts'] / df['counts'].sum() 
-            longitude[pole]['counts'] -= df['counts'].mean()
+            if 'POL' in pole:
+                longitude[pole]['counts'] = df['counts'] / df['counts'].sum() 
+                longitude[pole]['counts'] -= df['counts'].mean()
 
 
 def normalise_floor_ref(data:dict) -> None:
     """Normalise and floor reference data counts around 21cm line"""
     for pole, df in data.items():
-        if pole == 'GAL_LONG':
-            continue
-        data[pole]['counts'] = df['counts'] / df['counts'].sum() 
-        data[pole]['counts'] -= df['counts'].mean()
+        if 'POL' in pole:
+            data[pole]['counts'] = df['counts'] / df['counts'].sum() 
+            data[pole]['counts'] -= df['counts'].mean()
 
 
 def get_bt_scale_factor(ref_pol:dict, HI_profile:pd.DataFrame) -> float:
@@ -205,37 +212,37 @@ def get_bt_scale_factor(ref_pol:dict, HI_profile:pd.DataFrame) -> float:
     return f
 
 
-def bt_scale_obs(data:dict, factor:float) -> None:
-    """Apply brightness temp scale factor to observation data"""
+def bt_scale_obs(data:dict, HI_profiles:dict) -> None:
+    """Apply brightness temp scale factor to observation data based on HI Profile"""
     for longitude in data.values():
+        peak_BT = HI_profiles[longitude['GAL_LONG']]['BT'].max()
         for pole in longitude.keys():
-            if pole == 'GAL_LONG':
-                continue
-            longitude[pole]['counts'] *= factor
+            if 'POL' in pole:
+                factor = peak_BT / longitude[pole]['counts'].max()
+                longitude[pole]['counts'] *= factor
     
 
 def bt_scale_ref(data:dict, factor:float) -> None:
-    """Apply brightness temp scale factor to reference data"""
+    """Apply brightness temp scale factor to the single reference dataset"""
     for pole in data.keys():
-        if pole == 'GAL_LONG':
-            continue
-        data[pole]['counts'] *= factor
+        if 'POL' in pole:
+            data[pole]['counts'] *= factor
 
 
-def get_LSR_correction(ref_header) -> float:
+def get_LSR_correction(header) -> float:
     """Wrapper for Wolfgang Herrmann, Astropeiler Stockert code which
     gets observer's velocity relative to Local Standard of Rest"""
-    # print(ref_header['DATE-OBS'])
-    # print(Time(ref_header['DATE-OBS'], scale='utc'))
+    # print(header['DATE-OBS'])
+    # print(Time(header['DATE-OBS'], scale='utc'))
     # Extracting the observation times from the FITS header
-    date_obs = Time(ref_header['DATE-OBS'], scale='utc')
-    date_end = Time(ref_header['DATE-END'], scale='utc')
+    date_obs = Time(header['DATE-OBS'], scale='utc')
+    date_end = Time(header['DATE-END'], scale='utc')
     avg_time = date_obs + 0.5 * (date_end - date_obs)
-    _, vlsr = vlsr_calc(obs_lon=ref_header['SITELONG'], 
-                    obs_lat=ref_header['SITELAT'], 
-                    obs_ht=ref_header['SITEELEV'], 
-                    ra=ref_header['RA'],
-                    dec=ref_header['DEC'], 
+    _, vlsr = vlsr_calc(obs_lon=header['SITELONG'], 
+                    obs_lat=header['SITELAT'], 
+                    obs_ht=header['SITEELEV'], 
+                    ra=header['RA'],
+                    dec=header['DEC'], 
                     time=date_obs
                     )
     return vlsr 
@@ -245,19 +252,18 @@ def correct_obs_vlsr(data:dict, vlsr:float, f0:float) -> None:
     """Applies LSR relative velocity frequenc correction to observation data"""
     delta_f = (f0 * vlsr) / const.c.value
     for longitude in data.values():
+        vslr = get_LSR_correction()
         for pole in longitude.keys():
-            if pole == 'GAL_LONG':
-                continue
-            longitude[pole]['frequency'] -= delta_f
+            if 'POL' in pole:
+                longitude[pole]['frequency'] -= delta_f
 
 
 def correct_ref_vlsr(data:dict, vlsr:float, f0:float) -> None:
     """Applies LSR relative velocity frequenc correction to reference data"""
     delta_f = f0 * (vlsr) / const.c.value
     for pole in data.keys():
-        if pole == 'GAL_LONG':
-            continue
-        data[pole]['frequency'] -= delta_f
+        if 'POL' in pole:
+            data[pole]['frequency'] -= delta_f
 
 
 # extracting filenames
@@ -278,7 +284,7 @@ stacked_ref = stack_ref_by_longitude(ref_data)
 longitudes = extract_gal_longitudes([d for sublist in grouped_obs_data_dicts for d in sublist])
 HI_profiles = {}
 for file in bonn_file_names:
-    HI_profiles[f"{re.search(r'(gal\d+|ref\d*)', file).group()}"] = read_Bonn_data(file)
+    HI_profiles[f"{re.search(r'(gal_l\d+|ref\d*)', file).group()}"] = read_Bonn_data(file)
 
 # apply frequency window around 21 cm line
 window_obs(stacked_obs, HI_profiles['ref']['frequency'].min(), HI_profiles['ref']['frequency'].max())
@@ -289,23 +295,27 @@ normalise_floor_obs(stacked_obs)
 normalise_floor_ref(stacked_ref)
 
 # # brightness temperature scaling
+bt_scale_obs(stacked_obs, HI_profiles)
 bt_scale_factor = get_bt_scale_factor(stacked_ref['RIGHT_POL'], HI_profiles['ref'])
-bt_scale_obs(stacked_obs, bt_scale_factor)
 bt_scale_ref(stacked_ref, bt_scale_factor)
 
-# correct for LSR motion
+# correct each observation and the reference spectrum for LSR motion
 HI_rest = 1420.40575177e6 # rest frequency of 21 cm line
 vlsr = get_LSR_correction(ref_data[0]['HEADER'])
-correct_obs_vlsr(stacked_obs, vlsr.si.value, HI_rest)
-correct_ref_vlsr(stacked_ref, vlsr.si.value, HI_rest)
+# correct_obs_vlsr(stacked_obs, vlsr.si.value, HI_rest)
+# correct_ref_vlsr(stacked_ref, vlsr.si.value, HI_rest)
 
 # plots
 fig, ax = plt.subplots(1)
-for longitude in stacked_obs.values():
-    ax.plot(longitude['LEFT_POL']['frequency'], longitude['LEFT_POL']['counts'])
+for i, longitude in enumerate(stacked_obs.values()):
+    if i == 0:
+        ax.plot(longitude['LEFT_POL']['frequency'], longitude['LEFT_POL']['counts'])
+        ax.plot(HI_profiles[longitude['GAL_LONG']]['frequency'], HI_profiles[longitude['GAL_LONG']]['BT'], label='Bonn HI Profile $\\ell=28$', linestyle='--')
 
 ax.plot(stacked_ref['RIGHT_POL']['frequency'], stacked_ref['RIGHT_POL']['counts'])
-ax.plot(HI_profiles['ref']['frequency'], HI_profiles['ref']['BT'], label='Bonn HI Profile')
+ax.plot(HI_profiles['ref']['frequency'], HI_profiles['ref']['BT'], label='Bonn HI Profile $\\ell=207$', linestyle='--')
+
+ax.vlines(x=HI_rest, ymin=0, ymax=ax.get_ylim()[1], colors='k', alpha=0.7, linestyles='--', label='21cm rest frequency')
 ax.plot()
 # ax.hlines(y=0, color='r', linestyles='--', xmin=stacked_ref['RIGHT_POL']['frequency'].min(), xmax=stacked_ref['RIGHT_POL']['frequency'].max())
 ax.legend()
